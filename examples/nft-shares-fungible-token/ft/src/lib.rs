@@ -28,7 +28,7 @@ enum StorageKey {
 #[near_bindgen]
 impl Contract {
     #[init]
-    pub fn create(nft_contract_address: AccountId, nft_token_id: String, owner_id: ValidAccountId, shares_count: u128, decimals: u8, share_price: u128) -> Self {
+    pub fn create(nft_contract_address: AccountId, nft_token_id: String, owner_id: ValidAccountId, shares_count: U128, decimals: u8, share_price: U128) -> Self {
         Self::new(
             owner_id,
             shares_count,
@@ -48,6 +48,7 @@ impl Contract {
                 released: false
             },
         )
+        // TODO emit event
     }
 
     /// Initializes the contract with the given total supply owned by the given `owner_id` with
@@ -55,7 +56,7 @@ impl Contract {
 
     fn new(
         owner_id: ValidAccountId,
-        total_supply: u128,
+        total_supply: U128,
         metadata: shares_metadata::SharesMetadata,
     ) -> Self {
         assert!(!env::state_exists(), "Already initialized");
@@ -65,8 +66,39 @@ impl Contract {
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
         };
         this.token.internal_register_account(owner_id.as_ref());
-        this.token.internal_deposit(owner_id.as_ref(), total_supply);
+        this.token.internal_deposit(owner_id.as_ref(), total_supply.0);
         this
+    }
+
+    // Amout required to exit and redeem underlying NFT
+    pub fn exit_price(&self) -> U128 {
+        (self.ft_total_supply().0 * self.ft_metadata().share_price.0).into()
+    }
+
+    /// Returns balance Near tokens in vault
+    /// NFTs can be redeemed by paying Near. These tokens are the new backing for shares
+    pub fn vault_balance(&self) -> U128 {
+        let SharesMetadata { released, share_price, .. } = self.ft_metadata();
+        let balance = if !released {
+            0
+        } else {
+            self.ft_total_supply().0 * share_price.0
+        };
+
+        balance.into()
+    }
+
+    /// Returns Near balance of the shareholder
+    pub fn vault_balance_of(&self, from: ValidAccountId) -> U128 {
+        let SharesMetadata { released, share_price, .. } = self.ft_metadata();
+        let balance = if !released {
+            0
+        } else {
+            let shareholder_balance = self.ft_balance_of(from);
+            shareholder_balance.0 * share_price.0
+        };
+
+        balance.into()
     }
 
     fn on_account_closed(&mut self, account_id: AccountId, balance: Balance) {
@@ -118,12 +150,15 @@ mod tests {
         testing_env!(context.build());
 
         let contract = Contract::create(
-            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID.into(), accounts(0), TOTAL_SUPPLY, DECIMALS, SHARE_PRICE
+            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID.into(), accounts(0), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
         );
         testing_env!(context.is_view(true).build());
 
         assert_eq!(contract.ft_total_supply().0, TOTAL_SUPPLY);
         assert_eq!(contract.ft_balance_of(accounts(0)).0, TOTAL_SUPPLY);
+
+        let expected_exit_price = TOTAL_SUPPLY * SHARE_PRICE;
+        assert_eq!(contract.exit_price().0, expected_exit_price);
     }
 
     #[test]
@@ -139,7 +174,7 @@ mod tests {
         let mut context = get_context(accounts(2));
         testing_env!(context.build());
         let mut contract = Contract::create(
-            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID.into(), accounts(2), TOTAL_SUPPLY, DECIMALS, SHARE_PRICE
+            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID.into(), accounts(2), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
         );
         testing_env!(context
             .storage_usage(env::storage_usage())

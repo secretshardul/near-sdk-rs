@@ -1,5 +1,5 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::json_types::Base64VecU8;
+use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::AccountId;
 
@@ -18,7 +18,7 @@ pub struct SharesMetadata {
 
     pub nft_contract_address: AccountId,
     pub nft_token_id: String,
-    pub share_price: u128,
+    pub share_price: U128,
     pub released: bool
 }
 
