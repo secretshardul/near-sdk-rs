@@ -70,9 +70,19 @@ impl Contract {
         this
     }
 
-    // Amout required to exit and redeem underlying NFT
+    /// Exit price in Near to redeem underlying NFT
     pub fn exit_price(&self) -> U128 {
         (self.ft_total_supply().0 * self.ft_metadata().share_price.0).into()
+    }
+
+    /// Near tokens required by a user in addition to held shares to redeem NFT
+    pub fn redeem_amount_of(&self, from: ValidAccountId) -> U128 {
+        let SharesMetadata { released, share_price, .. } = self.ft_metadata();
+        assert!(!released, "token already redeemed");
+
+        let user_shares = self.ft_balance_of(from);
+
+        (self.exit_price().0 - user_shares.0 * share_price.0).into()
     }
 
     /// Returns balance Near tokens in vault
@@ -88,14 +98,15 @@ impl Contract {
         balance.into()
     }
 
-    /// Returns Near balance of the shareholder
+    /// Once NFT is redeemed by paying exit price, remaining shareholders get a
+    /// share of the deposited Near tokens in proportion of their owned shares
     pub fn vault_balance_of(&self, from: ValidAccountId) -> U128 {
         let SharesMetadata { released, share_price, .. } = self.ft_metadata();
         let balance = if !released {
             0
         } else {
-            let shareholder_balance = self.ft_balance_of(from);
-            shareholder_balance.0 * share_price.0
+            let user_shares = self.ft_balance_of(from);
+            user_shares.0 * share_price.0
         };
 
         balance.into()
