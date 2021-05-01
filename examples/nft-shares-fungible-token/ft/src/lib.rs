@@ -1,11 +1,13 @@
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryInto;
 
 use near_contract_standards::fungible_token::FungibleToken;
-use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::LazyOption;
-use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::{
-    env, log, near_bindgen, AccountId, Balance, BorshStorageKey, PanicOnDefault, PromiseOrValue, Promise, ext_contract
+    env, AccountId, Balance, PromiseOrValue, Promise,
+    BorshStorageKey, PanicOnDefault, log,
+    near_bindgen, ext_contract,
+    collections::LazyOption,
+    json_types::{ValidAccountId, U128},
+    borsh::{self, BorshDeserialize, BorshSerialize}
 };
 mod shares_metadata;
 use shares_metadata::{SharesMetadata, SharesMetadataProvider, SHARES_FT_METADATA_SPEC};
@@ -16,10 +18,6 @@ pub type TokenId = u64;
 
 #[ext_contract]
 pub trait NEP4 {
-    // Transfer the given `tokenId` to the given `accountId`. Account `accountId` becomes the new owner.
-    // Requirements:
-    // * The caller of the function (`predecessor_id`) should be the owner of the token. Callers who have
-    // escrow access should use transfer_from.
     fn transfer(&mut self, new_owner_id: AccountId, token_id: TokenId);
 }
 
@@ -42,44 +40,37 @@ enum StorageKey {
 impl Shares {
     #[init]
     pub fn create(nft_contract_address: AccountId, nft_token_id: TokenId, owner_id: ValidAccountId, shares_count: U128, decimals: u8, share_price: U128) -> Self {
-        Self::new(
-            owner_id,
-            shares_count,
-            SharesMetadata {
-                spec: SHARES_FT_METADATA_SPEC.to_string(),
-                name: "Example NEAR fungible token".to_string(),
-                symbol: "EXAMPLE".to_string(),
-                icon: Some(DATA_IMAGE_SVG_NEAR_ICON.to_string()),
-                reference: None,
-                reference_hash: None,
-                decimals,
+        // TODO allow payment in NEP-141 fungible tokens
 
-                // Shares FT specific metadata
-                nft_contract_address,
-                nft_token_id,
-                share_price,
-                released: false
-            },
-        )
-        // TODO emit event
-    }
-
-    /// Initializes the contract with the given total supply owned by the given `owner_id` with
-    /// the given fungible token metadata.
-
-    fn new(
-        owner_id: ValidAccountId,
-        total_supply: U128,
-        metadata: shares_metadata::SharesMetadata,
-    ) -> Self {
         assert!(!env::state_exists(), "Already initialized");
+
+        let metadata = SharesMetadata {
+            spec: SHARES_FT_METADATA_SPEC.to_string(),
+            name: "Example NEAR fungible token".to_string(),
+            symbol: "EXAMPLE".to_string(),
+            icon: Some(DATA_IMAGE_SVG_NEAR_ICON.to_string()),
+            reference: None,
+            reference_hash: None,
+            decimals,
+
+            // Shares FT specific metadata
+            nft_contract_address: nft_contract_address.clone(),
+            nft_token_id,
+            share_price,
+            released: false
+        };
         metadata.assert_valid();
+
         let mut this = Self {
             token: FungibleToken::new(StorageKey::FungibleToken),
             metadata: LazyOption::new(StorageKey::Metadata, Some(&metadata)),
         };
         this.token.internal_register_account(owner_id.as_ref());
-        this.token.internal_deposit(owner_id.as_ref(), total_supply.0);
+        this.token.internal_deposit(owner_id.as_ref(), shares_count.0);
+
+        // Emit event
+        this.on_securitize(owner_id.to_string(), nft_contract_address, nft_token_id);
+
         this
     }
 
@@ -137,7 +128,7 @@ impl Shares {
         let payment_amount = env::attached_deposit();
         let redeem_amount = self.redeem_amount_of(user_account_object.clone()).0;
 
-        // TODO allow payment in NEP-141 tokens
+        // TODO allow payment in NEP-141 fungible tokens
         assert!(payment_amount >= redeem_amount, "insufficient payment amount");
 
         // Return change amount to redeemer
@@ -160,15 +151,16 @@ impl Shares {
             env::prepaid_gas() / 2
         );
 
+        // Emit event
+        self.on_redeem(user_account, nft_contract_address, nft_token_id);
+
         // Cleanup
         self.cleanup();
-
-        // TODO Emit event
     }
 
     /// Once NFT is redeemed by paying NEAR tokens, remaining shareholders can claim their share of NEAR in vault
     pub fn claim(&mut self) {
-        let SharesMetadata { released, .. } = self.ft_metadata();
+        let SharesMetadata { released,  nft_contract_address, nft_token_id, .. } = self.ft_metadata();
         assert!(released, "token not redeemed");
 
         let user_account = env::signer_account_id();
@@ -188,10 +180,10 @@ impl Shares {
         // Transfer NEAR to user
         Promise::new(user_account.clone()).transfer(
             claim_amount.0
-        );
-        // TODO fungible token support for redeeming
+        ); // TODO allow payment in NEP-141 fungible tokens
 
-        // TODO emit event
+        // Emit event
+        self.on_claim(user_account, nft_contract_address, nft_token_id, user_shares);
 
         self.cleanup();
     }
@@ -211,6 +203,19 @@ impl Shares {
 
     fn on_tokens_burned(&mut self, account_id: AccountId, amount: Balance) {
         log!("Account @{} burned {}", account_id, amount);
+    }
+
+    fn on_securitize(&self, owner_address: AccountId, nft_contract_address: AccountId, nft_token_id: TokenId) {
+        log!("Securitize({}, {}, {}, {})", owner_address, nft_contract_address, nft_token_id, env::current_account_id());
+        // log!("Account @{} securitized NFT #{} on contract {}", owner_address, nft_token_id, nft_contract_address);
+    }
+
+    fn on_redeem(&mut self, redeemer_address: AccountId, nft_contract_address: AccountId, nft_token_id: TokenId) {
+        log!("Redeem({}, {}, {}, {})", redeemer_address, nft_contract_address, nft_token_id, env::current_account_id());
+    }
+
+    fn on_claim(&mut self, claimant_address: AccountId, nft_contract_address: AccountId, nft_token_id: TokenId, shares_count: U128) {
+        log!("Securitize({}, {}, {}, {}, {})", claimant_address, nft_contract_address, nft_token_id, env::current_account_id(), shares_count.0);
     }
 }
 
