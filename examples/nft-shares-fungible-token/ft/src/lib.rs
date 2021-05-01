@@ -22,9 +22,10 @@ pub trait NEP4 {
     // escrow access should use transfer_from.
     fn transfer(&mut self, new_owner_id: AccountId, token_id: TokenId);
 }
+
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
-pub struct Contract {
+pub struct Shares {
     token: FungibleToken,
     metadata: LazyOption<SharesMetadata>
 }
@@ -38,7 +39,7 @@ enum StorageKey {
 }
 
 #[near_bindgen]
-impl Contract {
+impl Shares {
     #[init]
     pub fn create(nft_contract_address: AccountId, nft_token_id: TokenId, owner_id: ValidAccountId, shares_count: U128, decimals: u8, share_price: U128) -> Self {
         Self::new(
@@ -148,6 +149,8 @@ impl Contract {
         // Set as redeemed
         self.ft_metadata().set_as_released();
 
+        // Burn shares
+
         // Transfer NFT to redeemer
         nep4::transfer(
             user_account_object.to_string(),
@@ -161,6 +164,36 @@ impl Contract {
         self.cleanup();
 
         // TODO Emit event
+    }
+
+    /// Once NFT is redeemed by paying NEAR tokens, remaining shareholders can claim their share of NEAR in vault
+    pub fn claim(&mut self) {
+        let SharesMetadata { released, .. } = self.ft_metadata();
+        assert!(released, "token not redeemed");
+
+        let user_account = env::signer_account_id();
+        let user_account_object: ValidAccountId = user_account.clone().try_into().unwrap();
+
+        let user_shares = self.ft_balance_of(user_account_object.clone());
+        assert!(user_shares.0 > 0, "nothing to claim");
+
+        let claim_amount = self.vault_balance_of(user_account_object.clone());
+        assert!(claim_amount.0 > 0, "balance has already been claimed");
+
+        // Burn tokens- TODO check correctness
+        self.token.accounts.insert(&user_account, &0);
+        self.token.total_supply -= user_shares.0;
+        self.on_tokens_burned(user_account.clone(), user_shares.0);
+
+        // Transfer NEAR to user
+        Promise::new(user_account.clone()).transfer(
+            claim_amount.0
+        );
+        // TODO fungible token support for redeeming
+
+        // TODO emit event
+
+        self.cleanup();
     }
 
     fn cleanup(&mut self) {
@@ -181,11 +214,11 @@ impl Contract {
     }
 }
 
-near_contract_standards::impl_fungible_token_core!(Contract, token, on_tokens_burned);
-near_contract_standards::impl_fungible_token_storage!(Contract, token, on_account_closed);
+near_contract_standards::impl_fungible_token_core!(Shares, token, on_tokens_burned);
+near_contract_standards::impl_fungible_token_storage!(Shares, token, on_account_closed);
 
 #[near_bindgen]
-impl SharesMetadataProvider for Contract {
+impl SharesMetadataProvider for Shares {
     fn ft_metadata(&self) -> SharesMetadata {
         self.metadata.get().unwrap()
     }
@@ -220,7 +253,7 @@ mod tests {
         let mut context = get_context(accounts(1));
         testing_env!(context.build());
 
-        let contract = Contract::create(
+        let contract = Shares::create(
             NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID, accounts(0), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
         );
         testing_env!(context.is_view(true).build());
@@ -237,14 +270,14 @@ mod tests {
     fn test_default() {
         let context = get_context(accounts(1));
         testing_env!(context.build());
-        let _contract = Contract::default();
+        let _contract = Shares::default();
     }
 
     #[test]
     fn test_transfer() {
         let mut context = get_context(accounts(2));
         testing_env!(context.build());
-        let mut contract = Contract::create(
+        let mut contract = Shares::create(
             NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID, accounts(2), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
         );
         testing_env!(context
