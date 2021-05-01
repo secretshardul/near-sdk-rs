@@ -4,6 +4,7 @@ use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::AccountId;
 
 pub const SHARES_FT_METADATA_SPEC: &str = "shares-ft-1.0.0";
+pub type TokenId = u64;
 
 #[derive(BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize)]
 #[serde(crate = "near_sdk::serde")]
@@ -17,7 +18,7 @@ pub struct SharesMetadata {
     pub decimals: u8,
 
     pub nft_contract_address: AccountId,
-    pub nft_token_id: String,
+    pub nft_token_id: TokenId,
     pub share_price: U128,
     pub released: bool
 }
@@ -33,5 +34,9 @@ impl SharesMetadata {
         if let Some(reference_hash) = &self.reference_hash {
             assert_eq!(reference_hash.0.len(), 32, "Hash has to be 32 bytes");
         }
+    }
+
+    pub fn set_as_released(&mut self) {
+        self.released = true;
     }
 }

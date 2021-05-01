@@ -1,15 +1,27 @@
+use std::convert::{TryFrom, TryInto};
+
 use near_contract_standards::fungible_token::FungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::LazyOption;
 use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::{
-    env, log, near_bindgen, AccountId, Balance, BorshStorageKey, PanicOnDefault, PromiseOrValue,
+    env, log, near_bindgen, AccountId, Balance, BorshStorageKey, PanicOnDefault, PromiseOrValue, Promise, ext_contract
 };
 mod shares_metadata;
 use shares_metadata::{SharesMetadata, SharesMetadataProvider, SHARES_FT_METADATA_SPEC};
 
 near_sdk::setup_alloc!();
 
+pub type TokenId = u64;
+
+#[ext_contract]
+pub trait NEP4 {
+    // Transfer the given `tokenId` to the given `accountId`. Account `accountId` becomes the new owner.
+    // Requirements:
+    // * The caller of the function (`predecessor_id`) should be the owner of the token. Callers who have
+    // escrow access should use transfer_from.
+    fn transfer(&mut self, new_owner_id: AccountId, token_id: TokenId);
+}
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
@@ -28,7 +40,7 @@ enum StorageKey {
 #[near_bindgen]
 impl Contract {
     #[init]
-    pub fn create(nft_contract_address: AccountId, nft_token_id: String, owner_id: ValidAccountId, shares_count: U128, decimals: u8, share_price: U128) -> Self {
+    pub fn create(nft_contract_address: AccountId, nft_token_id: TokenId, owner_id: ValidAccountId, shares_count: U128, decimals: u8, share_price: U128) -> Self {
         Self::new(
             owner_id,
             shares_count,
@@ -112,6 +124,54 @@ impl Contract {
         balance.into()
     }
 
+    /// Redeem NFT through owned shares or NEAR payment
+    #[payable]
+    pub fn redeem(&mut self) {
+        let SharesMetadata { released, nft_token_id, nft_contract_address, .. } = self.ft_metadata();
+        assert!(!released, "token already redeemed");
+
+        let user_account = env::signer_account_id();
+        let user_account_object: ValidAccountId = user_account.clone().try_into().unwrap();
+
+        let payment_amount = env::attached_deposit();
+        let redeem_amount = self.redeem_amount_of(user_account_object.clone()).0;
+
+        // TODO allow payment in NEP-141 tokens
+        assert!(payment_amount >= redeem_amount, "insufficient payment amount");
+
+        // Return change amount to redeemer
+        let change_amount = redeem_amount - payment_amount;
+        Promise::new(user_account.clone()).transfer(
+            change_amount
+        );
+
+        // Set as redeemed
+        self.ft_metadata().set_as_released();
+
+        // Transfer NFT to redeemer
+        nep4::transfer(
+            user_account_object.to_string(),
+            nft_token_id,
+            &nft_contract_address,
+            0,
+            env::prepaid_gas() / 2
+        );
+
+        // Cleanup
+        self.cleanup();
+
+        // TODO Emit event
+    }
+
+    fn cleanup(&mut self) {
+        let shares_left = self.ft_total_supply();
+        if shares_left.0 == 0 {
+            // Destroy contract
+            Promise::new(env::current_account_id()).delete_account("".to_string());
+
+        }
+    }
+
     fn on_account_closed(&mut self, account_id: AccountId, balance: Balance) {
         log!("Closed @{} with {}", account_id, balance);
     }
@@ -141,7 +201,7 @@ mod tests {
 
     const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000;
     const NFT_CONTRACT_ADDRESS: &'static str = "nft.near";
-    const NFT_TOKEN_ID: &'static str = "0";
+    const NFT_TOKEN_ID: TokenId = 0;
     const DECIMALS: u8 = 8;
     const SHARE_PRICE: u128 = 100000;
 
@@ -161,7 +221,7 @@ mod tests {
         testing_env!(context.build());
 
         let contract = Contract::create(
-            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID.into(), accounts(0), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
+            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID, accounts(0), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
         );
         testing_env!(context.is_view(true).build());
 
@@ -185,7 +245,7 @@ mod tests {
         let mut context = get_context(accounts(2));
         testing_env!(context.build());
         let mut contract = Contract::create(
-            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID.into(), accounts(2), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
+            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID, accounts(2), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
         );
         testing_env!(context
             .storage_usage(env::storage_usage())
