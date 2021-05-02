@@ -123,7 +123,8 @@ impl Shares {
         assert!(!released, "token already redeemed");
 
         let user_account = env::signer_account_id();
-        let user_account_object: ValidAccountId = user_account.clone().try_into().unwrap();
+
+        let user_account_object: ValidAccountId = (user_account.clone()).try_into().unwrap();
 
         let payment_amount = env::attached_deposit();
         let redeem_amount = self.redeem_amount_of(user_account_object.clone()).0;
@@ -132,15 +133,22 @@ impl Shares {
         assert!(payment_amount >= redeem_amount, "insufficient payment amount");
 
         // Return change amount to redeemer
-        let change_amount = redeem_amount - payment_amount;
+        let change_amount = payment_amount - redeem_amount;
         Promise::new(user_account.clone()).transfer(
             change_amount
         );
 
         // Set as redeemed
-        self.ft_metadata().set_as_released();
+        let mut new_metadata = self.ft_metadata();
+        new_metadata.set_as_released();
+
+        self.metadata.replace(&new_metadata);
 
         // Burn shares
+        let user_shares = self.ft_balance_of(user_account_object.clone());
+        self.token.accounts.insert(&user_account, &0);
+        self.token.total_supply -= user_shares.0;
+        self.on_tokens_burned(user_account.clone(), user_shares.0);
 
         // Transfer NFT to redeemer
         nep4::transfer(
@@ -188,12 +196,14 @@ impl Shares {
         self.cleanup();
     }
 
+
     fn cleanup(&mut self) {
         let shares_left = self.ft_total_supply();
         if shares_left.0 == 0 {
-            // Destroy contract
-            Promise::new(env::current_account_id()).delete_account("".to_string());
+            // TODO Remove current contract address Fractose contract
 
+            // Delete contract if all shares have been burnt
+            Promise::new(env::current_account_id()).delete_account("system".to_string());
         }
     }
 
@@ -259,7 +269,12 @@ mod tests {
         testing_env!(context.build());
 
         let contract = Shares::create(
-            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID, accounts(0), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
+            NFT_CONTRACT_ADDRESS.into(),
+            NFT_TOKEN_ID,
+            accounts(0),
+            TOTAL_SUPPLY.into(),
+            DECIMALS,
+            SHARE_PRICE.into()
         );
         testing_env!(context.is_view(true).build());
 
@@ -283,7 +298,12 @@ mod tests {
         let mut context = get_context(accounts(2));
         testing_env!(context.build());
         let mut contract = Shares::create(
-            NFT_CONTRACT_ADDRESS.into(), NFT_TOKEN_ID, accounts(2), TOTAL_SUPPLY.into(), DECIMALS, SHARE_PRICE.into()
+            NFT_CONTRACT_ADDRESS.into(),
+            NFT_TOKEN_ID,
+            accounts(2),
+            TOTAL_SUPPLY.into(),
+            DECIMALS,
+            SHARE_PRICE.into()
         );
         testing_env!(context
             .storage_usage(env::storage_usage())
@@ -310,4 +330,124 @@ mod tests {
         assert_eq!(contract.ft_balance_of(accounts(2)).0, (TOTAL_SUPPLY - transfer_amount));
         assert_eq!(contract.ft_balance_of(accounts(1)).0, transfer_amount);
     }
+
+    #[test]
+    fn test_redeem_with_shares() {
+        let context = get_context(accounts(0));
+        testing_env!(context.build());
+
+        let mut contract = Shares::create(
+            NFT_CONTRACT_ADDRESS.into(),
+            NFT_TOKEN_ID,
+            accounts(0),
+            TOTAL_SUPPLY.into(),
+            DECIMALS,
+            SHARE_PRICE.into()
+        );
+
+        contract.redeem();
+
+        // Tests
+        let SharesMetadata { released, .. } = contract.ft_metadata();
+        assert!(released);
+        let user_balance = contract.ft_balance_of(accounts(0));
+        assert!(user_balance.0 == 0);
+        assert!(contract.ft_total_supply().0 == 0);
+    }
+
+    #[test]
+    fn test_redeem_with_exit_price() {
+        let mut context = get_context(accounts(0));
+        testing_env!(context.build());
+
+        let mut contract = Shares::create(
+            NFT_CONTRACT_ADDRESS.into(),
+            NFT_TOKEN_ID,
+            accounts(1),
+            TOTAL_SUPPLY.into(),
+            DECIMALS,
+            SHARE_PRICE.into()
+        );
+
+        let redeem_amount = contract.redeem_amount_of(accounts(0));
+        testing_env!(context.attached_deposit(redeem_amount.0).build());
+
+        contract.redeem();
+
+        // Tests
+        let SharesMetadata { released, .. } = contract.ft_metadata();
+        assert!(released);
+        let user_balance = contract.ft_balance_of(accounts(0));
+        assert!(user_balance.0 == 0);
+        assert!(contract.ft_total_supply().0 == TOTAL_SUPPLY);
+    }
+
+    #[test]
+    fn test_redeem_with_shares_and_exit_price() {
+        let mut context = get_context(accounts(0));
+        testing_env!(context.build());
+
+        let mut contract = Shares::create(
+            NFT_CONTRACT_ADDRESS.into(),
+            NFT_TOKEN_ID,
+            accounts(0),
+            TOTAL_SUPPLY.into(),
+            DECIMALS,
+            SHARE_PRICE.into()
+        );
+
+        // Paying for account registration for account 1
+        testing_env!(context
+            .storage_usage(env::storage_usage())
+            .attached_deposit(contract.storage_balance_bounds().min.into())
+            .predecessor_account_id(accounts(1))
+            .build());
+
+
+        contract.storage_deposit(None, None);
+
+
+        // Switch to account 0, transfer some shares to account 1
+        let transferred_shares = 100;
+
+        testing_env!(context
+            .storage_usage(env::storage_usage())
+            .attached_deposit(1)
+            .signer_account_id(accounts(0))
+            .predecessor_account_id(accounts(0))
+            .build());
+
+        contract.ft_transfer(accounts(1), transferred_shares.into(), None);
+
+        let sender_balance = contract.ft_balance_of(accounts(0));
+        let receiver_balance = contract.ft_balance_of(accounts(1));
+
+        assert_eq!(sender_balance.0, TOTAL_SUPPLY - transferred_shares, "Error sender balance: {}", sender_balance.0);
+        assert_eq!(receiver_balance.0, transferred_shares, "Error receiver balance: {}", receiver_balance.0);
+
+        let redeem_amount = contract.redeem_amount_of(accounts(1));
+        let exit_price = contract.exit_price();
+        assert!(redeem_amount.0 + transferred_shares*SHARE_PRICE == exit_price.0);
+
+        // Switch to account 1, then redeem
+        // Payment will be through shares and NEAR
+        testing_env!(context
+            .attached_deposit(redeem_amount.0)
+            .signer_account_id(accounts(1))
+            .predecessor_account_id(accounts(1))
+            .build());
+
+        contract.redeem();
+
+        // Tests
+        assert!(contract.ft_metadata().released);
+
+        assert!(contract.ft_total_supply().0 == TOTAL_SUPPLY - transferred_shares, "Total supply {}", contract.ft_total_supply().0);
+
+        let shareholder_balance = contract.ft_balance_of(accounts(0));
+        let redeemer_balance = contract.ft_balance_of(accounts(1));
+        assert!(redeemer_balance.0 == 0, "Redeemer balance: {}, shareholder balance: {}", redeemer_balance.0, shareholder_balance.0);
+    }
+
+    // TODO tests for claim() function
 }
